@@ -1,6 +1,11 @@
 import express from 'express';
 import { register, login, getMe, logout } from '../controllers/auth';
 import { protect } from '../middleware/auth';
+import {
+  validateRegistration,
+  validateLogin,
+  handleValidationErrors
+} from '../middleware/security';
 
 const router = express.Router();
 
@@ -45,7 +50,7 @@ const router = express.Router();
  *       400:
  *         description: Bad request
  */
-router.post('/register', register);
+router.post('/register', validateRegistration, handleValidationErrors, register);
 
 /**
  * @swagger
@@ -78,7 +83,7 @@ router.post('/register', register);
  *       401:
  *         description: Invalid credentials
  */
-router.post('/login', login);
+router.post('/login', validateLogin, handleValidationErrors, login);
 
 /**
  * @swagger

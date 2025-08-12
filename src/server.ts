@@ -4,6 +4,18 @@ import cors from 'cors';
 import connectDB from './config/db';
 import errorHandler from './middleware/error';
 import { swaggerUi, swaggerDocs } from './config/swagger';
+import { helmetConfig, rateLimiters, SECURITY_CONFIG } from './config/security';
+import {
+  requestLogger,
+  securityLogger,
+  sanitizeData,
+  compressionMiddleware,
+  apiKeyAuth,
+  requestSizeLimit,
+  additionalSecurityHeaders,
+  httpsRedirect,
+  requestTimeout
+} from './middleware/security';
 
 // Load env vars
 dotenv.config();
@@ -20,43 +32,66 @@ const app: Application = express();
 // Trust proxy for proper IP handling
 app.set('trust proxy', 1);
 
-// Body parser
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// HTTPS redirect (production only)
+app.use(httpsRedirect);
 
-// Enable CORS
-app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'http://localhost:5173',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:3001',
-    'http://127.0.0.1:5173',
-    'https://localhost:3000',
-    'https://localhost:3001',
-    'https://localhost:5173'
-  ],
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
-  optionsSuccessStatus: 200 // Some legacy browsers (IE11, various SmartTVs) choke on 204
+// Request timeout
+app.use(requestTimeout(30000)); // 30 seconds
+
+// Security headers
+app.use(helmetConfig);
+app.use(additionalSecurityHeaders);
+
+// Request logging
+app.use(requestLogger);
+
+// Security monitoring
+app.use(securityLogger);
+
+// Compression
+app.use(compressionMiddleware);
+
+// Request size limiting
+app.use(requestSizeLimit);
+
+// Body parser with size limits
+app.use(express.json({
+  limit: SECURITY_CONFIG.MAX_JSON_SIZE,
+  type: 'application/json'
+}));
+app.use(express.urlencoded({
+  extended: true,
+  limit: SECURITY_CONFIG.MAX_URL_ENCODED_SIZE
 }));
 
-// Additional CORS headers for development
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,PATCH,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma');
-  
-  // Handle preflight requests
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-  } else {
-    next();
-  }
-});
+// Data sanitization
+app.use(sanitizeData);
+
+// API Key authentication (optional)
+app.use(apiKeyAuth);
+
+// Enable CORS with security configuration
+app.use(cors({
+  origin: SECURITY_CONFIG.ALLOWED_ORIGINS,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+    SECURITY_CONFIG.API_KEY_HEADER
+  ],
+  optionsSuccessStatus: 200,
+  maxAge: 86400 // 24 hours
+}));
+
+// Rate limiting for different endpoints
+app.use('/api/v1/health', rateLimiters.health);
+app.use('/api-docs', rateLimiters.docs);
+app.use('/api/v1/auth', rateLimiters.auth);
+app.use('/api/v1', rateLimiters.general);
 
 // Mount Swagger docs
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
@@ -72,7 +107,13 @@ app.get('/api/v1/health', (req: Request, res: Response) => {
     message: 'API is running',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
-    uptime: `${Math.floor(process.uptime())} seconds`
+    uptime: `${Math.floor(process.uptime())} seconds`,
+    security: {
+      helmet: 'enabled',
+      rateLimit: 'enabled',
+      cors: 'enabled',
+      sanitization: 'enabled'
+    }
   });
 });
 
@@ -95,7 +136,22 @@ const server = app.listen(PORT, () => {
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (err: Error) => {
-  console.log(`Error: ${err.message}`);
+  console.log(`🚨 Unhandled Promise Rejection: ${err.message}`);
   // Close server & exit process
   server.close(() => process.exit(1));
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (err: Error) => {
+  console.log(`🚨 Uncaught Exception: ${err.message}`);
+  console.log('Shutting down the server due to uncaught exception');
+  process.exit(1);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('👋 SIGTERM received. Shutting down gracefully');
+  server.close(() => {
+    console.log('💀 Process terminated');
+  });
 });
